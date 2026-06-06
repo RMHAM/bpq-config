@@ -11,3 +11,8 @@ After cloning, enable the pre-commit hooks:
 ```sh
 git config core.hooksPath .githooks
 ```
+
+The pre-commit hook runs before every commit:
+
+1. **Syntax check** — `perl -c bpq-config` rejects files with compile errors.
+2. **Test suite** — `prove t/` runs all tests in `t/`. The commit is blocked if any test fails.
