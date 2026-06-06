@@ -5,7 +5,7 @@
 #  Willem A. Schreuder AC0KQ
 #  willem@prinmath.com
 #
-#  Interacive program to configure BPQ32
+#  Interactive program to configure BPQ32
 #
 #  Please note that while this program allows many parameters to
 #  be configured, BPQ32 has many more features and options than
@@ -34,13 +34,15 @@
 #  Version 1.0.14 22-Nov-2021  Remove bluetooth again - too many conflicts.
 #  Version 1.0.15 31-Mar-2022  Add libconfig9 to prerequisites
 #  Version 1.0.16 25-May-2023  Add libpcap0.8 to prerequisites
+#  Version 1.1.0   6-Jun-2026  Offline flag, hardening, new features (Joey Stanford NV0N)
 
 use strict;
+use warnings;
 
-my $ver = '1.0.16';
+my $ver = '1.1.0';
 
 my $about =
-  "Interacive program to configure BPQ32.\n".
+  "Interactive program to configure BPQ32.\n".
   "\n".
   "Willem A. Schreuder AC0KQ\n".
   "willem\@prinmath.com\n".
@@ -53,6 +55,16 @@ my $about =
   "Please provide bug reports and improvements.\n";
 
 #
+#  Offline mode flag
+#
+my $offline = 0;
+if (@ARGV>0 && ($ARGV[0] eq '-o' || $ARGV[0] eq '--offline'))
+{
+   $offline = 1;
+   shift @ARGV;
+}
+$offline ||= $ENV{BPQ_OFFLINE} ? 1 : 0;
+
 #  Help
 #
 if (@ARGV>0  && $ARGV[0] eq '-h')
@@ -60,6 +72,7 @@ if (@ARGV>0  && $ARGV[0] eq '-h')
    warn "bpq-config Version $ver\n\n";
    warn "bpq-config -q forces quick start\n";
    warn "bpq-config -u updates software and restart BPQ\n";
+   warn "bpq-config -o|--offline skips self-update\n";
    warn "All others are interactive\n\n";
    warn $about;
    exit;
@@ -69,10 +82,10 @@ if (@ARGV>0  && $ARGV[0] eq '-h')
 ($< == 0) || die "Must be root to run bpq-config.  Try: sudo ./bpq-config\n";
 
 #  Global storage
-my (%port,%map,%user,$save,$CRC16);
+my (%port,%map,%user,%alias,$save,$CRC16,$CFG,$DAT);
 
 #  Determine system type
-my $bb = (-e '/etc/dogtag') ? 1 : 0;
+my $bb = (-d '/sys/devices/platform/bone_capemgr') ? 1 : 0;
 my $devices = $bb ? "\nSerial ports are numbered 1, 2, 4 or 5"
   : "\nThere is only one serial port numbered 0\nI2C bus addresses are in decimal\nUSB devices are numbered 0,1,2,...";
 
@@ -131,17 +144,27 @@ my @sys =
 my @radio =
    (
    {ITEM=>'Type'          ,VALUE=>''     ,TEST=>['Packet','APRS','APRS rx only']  ,TXT=>'of port'                                             },
-   {ITEM=>'Device Type'   ,VALUE=>''     ,TEST=>['Serial','I2C','USB']            ,TXT=>$devices                                              },
-   {ITEM=>'Device Number' ,VALUE=>''     ,TEST=>'^[0-9]+$'                        ,TXT=>$devices                                              },
-   {ITEM=>'USB Speed'     ,VALUE=>'19200',TEST=>'^[0-9]+$'                        ,TXT=>'TNC to Computer'            , COND=>'Device Type=USB'},
-   {ITEM=>'Speed'         ,VALUE=>'1200' ,TEST=>['1200','9600'],                  ,TXT=>'Baud Rate'                                           },
+    {ITEM=>'Device Type'   ,VALUE=>''     ,TEST=>['Serial','I2C','USB','KISS TCP','AGW PE','AX.25']            ,TXT=>$devices                                              },
+    {ITEM=>'Device Number' ,VALUE=>''     ,TEST=>'^[0-9]+$'                        ,TXT=>$devices                                              },
+    {ITEM=>'USB Speed'     ,VALUE=>'19200',TEST=>'^[0-9]+$'                        ,TXT=>'TNC to Computer'            , COND=>'Device Type=USB'},
+    {ITEM=>'TCP Host'      ,VALUE=>''     ,TEST=>'^(\d+\.\d+\.\d+\.\d+|[\S]+)$'    ,TXT=>'IP address or hostname'     , COND=>'Device Type=KISS TCP'},
+    {ITEM=>'TCP Port'      ,VALUE=>'8100' ,TEST=>'^[0-9]+$'                        ,TXT=>'TCP port for KISS connection', COND=>'Device Type=KISS TCP'},
+    {ITEM=>'AGW Host'      ,VALUE=>''     ,TEST=>'^(\d+\.\d+\.\d+\.\d+|[\S]+)$'    ,TXT=>'IP address or hostname'     , COND=>'Device Type=AGW PE'},
+    {ITEM=>'AGW Port'      ,VALUE=>'8100' ,TEST=>'^[0-9]+$'                        ,TXT=>'TCP port for AGW connection' , COND=>'Device Type=AGW PE'},
+    {ITEM=>'AX.25 Iface'   ,VALUE=>''     ,TEST=>'^[\S]+$'                        ,TXT=>'AX.25 interface name (e.g. ax0)', COND=>'Device Type=AX.25'},
+    {ITEM=>'Speed'         ,VALUE=>'1200' ,TEST=>['1200','9600','19200','38400','57600','115200'],                  ,TXT=>'Baud Rate'                                           },
    {ITEM=>'Frequency'     ,VALUE=>''     ,TEST=>'^[1-9][0-9][0-9][0-9][0-9][0-9]$',TXT=>'kHz e.g. 145050'                                     },
    {ITEM=>'Digipeat'      ,VALUE=>'Yes'  ,TEST=>undef,                            ,TXT=>'Enable digipeating on this port'                     },
    {ITEM=>'WL2K'          ,VALUE=>'No'   ,TEST=>undef,                            ,TXT=>'Report to WinLink2000'                               },
    {ITEM=>'Power'         ,VALUE=>''     ,TEST=>'^[0-9]+(\.[0-9]*)?$',            ,TXT=>'Transmitter power in watts' , COND=>'WL2K'           },
    {ITEM=>'Height'        ,VALUE=>''     ,TEST=>'^[0-9]+(\.[0-9]*)?$',            ,TXT=>'Antenna height in feet'     , COND=>'WL2K'           },
-   {ITEM=>'Gain'          ,VALUE=>''     ,TEST=>'^[0-9]+(\.[0-9]*)?$',            ,TXT=>'Antenna gain in dB'         , COND=>'WL2K'           },
-   );
+    {ITEM=>'Gain'          ,VALUE=>''     ,TEST=>'^[0-9]+(\.[0-9]*)?$',            ,TXT=>'Antenna gain in dB'         , COND=>'WL2K'           },
+    {ITEM=>'KISS Options'  ,VALUE=>'PITNC,NOPARAMS',TEST=>'^[\S]+$'                ,TXT=>'e.g. PITNC,NOPARAMS'                                },
+    {ITEM=>'Modem Type'    ,VALUE=>'None' ,TEST=>['None','ARDOP','VARA HF','VARA FM'],TXT=>'HF modem (None for packet)'                       },
+    {ITEM=>'Modem Port'    ,VALUE=>'8515' ,TEST=>'^[0-9]+$'                        ,TXT=>'TCP port for modem', COND=>'Modem Type=ARDOP'      },
+    {ITEM=>'Modem Port'    ,VALUE=>'8300' ,TEST=>'^[0-9]+$'                        ,TXT=>'TCP port for modem', COND=>'Modem Type=VARA HF'    },
+    {ITEM=>'Modem Port'    ,VALUE=>'8300' ,TEST=>'^[0-9]+$'                        ,TXT=>'TCP port for modem', COND=>'Modem Type=VARA FM'    },
+    );
 my @map =
    (
    {ITEM=>'Callsign',VALUE=>''     ,TEST=>'^[A-Za-z]+[0-9]+[A-Za-z]+(-\d+)?$',TXT=>'Node callsign (SSID optional)'},
@@ -154,9 +177,15 @@ my @user =
    {ITEM=>'Password'   ,VALUE=>'',TEST=>'^[\S]+$'                    ,TXT=>'e.g. XyZ123'                                 },
    {ITEM=>'Callsign'   ,VALUE=>'',TEST=>'^[A-Za-z]+[0-9]+[A-Za-z]+$' ,TXT=>'for telnet user'                             },
    {ITEM=>'Application',VALUE=>'',TEST=>['NODE','BBS']               ,TXT=>'Select application to connect to',COND=>undef},
-   {ITEM=>'SysOp'      ,VALUE=>'',TEST=>undef                        ,TXT=>'System operator priviliges'                  },
-   );
-
+    {ITEM=>'SysOp'      ,VALUE=>'',TEST=>undef                        ,TXT=>'System operator priviliges'                  },
+    );
+my @alias =
+    (
+    {ITEM=>'Alias'    ,VALUE=>''     ,TEST=>'^[A-Za-z]+[0-9A-Za-z]*$'   ,TXT=>'Short alias for node (e.g. CTN)'             },
+    {ITEM=>'Callsign' ,VALUE=>''     ,TEST=>'^[A-Za-z]+[0-9]+[A-Za-z]+(-\d+)?$',TXT=>'Node callsign (SSID optional)'        },
+    {ITEM=>'Quality'  ,VALUE=>'220'  ,TEST=>'^[0-9]+$'                  ,TXT=>'Quality factor (typically 220)'              },
+    );
+ 
 #
 #  CRC check
 #
@@ -182,8 +211,8 @@ sub filehash
 {
    my ($file) = @_;
    my $text;
-   open(F , "<$file") || return 0;
-   while (my $line = <F>)
+   open(my $fh , "<$file") || return 0;
+   while (my $line = <$fh>)
    {
       #  Remove comments
       $line =~ s/\;.*$//;
@@ -197,7 +226,7 @@ sub filehash
       #  Accumulate text
       $text .= $line;
    }
-   close(F);
+   close($fh);
    return crc16($text);
 }
 
@@ -418,24 +447,37 @@ sub table
 }
 
 #
+#  Run system command and warn on failure
+#
+sub sys
+{
+   my ($cmd,$desc) = @_;
+   $desc ||= $cmd;
+   system($cmd) && warn "sys: $desc failed (exit " . ($? >> 8) . ")\n";
+}
+
+#
 #  Download
 #
 sub download
 {
-   #  Mirror bpq-config
-   system("wget -m -nd -nH https://www.prinmath.com/ham/bpq-config;chmod a+x bpq-config");
+   #  Mirror bpq-config (skip if offline)
+   if (!$offline)
+   {
+      sys("wget -m -nd -nH https://www.prinmath.com/ham/bpq-config;chmod a+x bpq-config","Self-update");
+   }
    #  Delete and re-download pilinbpq
-   system("rm -f pilinbpq;wget https://www.cantab.net/users/john.wiseman/Downloads/pilinbpq;chmod a+x pilinbpq");
+   sys("rm -f pilinbpq;wget https://www.cantab.net/users/john.wiseman/Downloads/pilinbpq;chmod a+x pilinbpq","pilinbpq download");
    #  Delete and re-dowload HTML pages
-   system("rm -Rf HTML;mkdir HTML;(cd HTML;wget https://www.cantab.net/users/john.wiseman/Downloads/HTMLPages.zip;unzip -q HTMLPages.zip;rm -f HTMLPages.zip)");
+   sys("rm -Rf HTML;mkdir HTML;(cd HTML;wget https://www.cantab.net/users/john.wiseman/Downloads/HTMLPages.zip;unzip -q HTMLPages.zip;rm -f HTMLPages.zip)","HTML pages");
    #  Delete and re-download pitnc_*params
-   system("rm -f pitnc_*params;wget https://www.cantab.net/users/john.wiseman/Downloads/pitnc_getset.zip;unzip -q pitnc_getset.zip pitnc_\\*params;chmod a+x pitnc_*params;rm -f pitnc_getset.zip");
+   sys("rm -f pitnc_*params;wget https://www.cantab.net/users/john.wiseman/Downloads/pitnc_getset.zip;unzip -q pitnc_getset.zip pitnc_\\*params;chmod a+x pitnc_*params;rm -f pitnc_getset.zip","pitnc params");
    #  Download piBPQAPRS
-   system("rm -f piBPQAPRS;wget https://www.cantab.net/users/john.wiseman/Downloads/piBPQAPRS;chmod a+x piBPQAPRS");
+   sys("rm -f piBPQAPRS;wget https://www.cantab.net/users/john.wiseman/Downloads/piBPQAPRS;chmod a+x piBPQAPRS","piBPQAPRS");
    #  Download Symbols and Maps
-   system("rm -Rf BPQAPRS;mkdir BPQAPRS;wget https://www.cantab.net/users/john.wiseman/Downloads/LinBPQAPRS.zip;unzip -q LinBPQAPRS.zip;rm -f LinBPQAPRS.zip");
+   sys("rm -Rf BPQAPRS;mkdir BPQAPRS;wget https://www.cantab.net/users/john.wiseman/Downloads/LinBPQAPRS.zip;unzip -q LinBPQAPRS.zip;rm -f LinBPQAPRS.zip","Symbols/Maps");
    #  Download APRS HTML pages
-   system("(cd BPQAPRS;wget https://www.cantab.net/users/john.wiseman/Documents/Samples/APRSHTML.zip;unzip -o -q APRSHTML.zip;rm -f APRSHTML.zip)");
+   sys("(cd BPQAPRS;wget https://www.cantab.net/users/john.wiseman/Documents/Samples/APRSHTML.zip;unzip -o -q APRSHTML.zip;rm -f APRSHTML.zip)","APRS HTML");
 }
 
 #  Check configuration
@@ -462,7 +504,6 @@ sub conflist
    while ($run)
    {
       my @list = sort keys %$ptr;
-      my $next = 
       my $step = menu(title=>"$Type Configuration",hdr=>"Select $type to configure",on=>1,
                       list=>["Add $type","Delete $type",@list],
                       ok=>'Select',cancel=>'Finish');
@@ -504,7 +545,7 @@ sub configure
    {
       my ($key) = confcheck(@sys);
       my $step = menu(title=>'Configuration Steps',hdr=>'Select next step',on=>$key ? 1 : 2,
-                      list=>['Node Configuration','Port configuration','Telnet users','AXIP Node Maps','Write Configuration'],
+                      list=>['Node Configuration','Port configuration','Telnet users','AXIP Node Maps','Node Aliases','Write Configuration'],
                       ok=>'Select',cancel=>'Finish');
       if ($step eq "")
       {
@@ -522,14 +563,18 @@ sub configure
       {
          conflist('User',0,\%user,@user);
       }
-      elsif ($step==4)
-      {
-         conflist('Map',0,\%map,@map);
-      }
-      elsif ($step==5)
-      {
-         confwrite($file0);
-      }
+       elsif ($step==4)
+       {
+          conflist('Map',0,\%map,@map);
+       }
+       elsif ($step==5)
+       {
+          conflist('Alias',0,\%alias,@alias);
+       }
+       elsif ($step==6)
+       {
+          confwrite($file0);
+       }
    }
 }
 
@@ -541,11 +586,11 @@ sub WriteLine
    my ($cmd,$rem) = @_;
    if ($rem)
    {
-      printf CFG "%-48s ; %s\n" , $cmd , $rem;
+      printf $CFG "%-48s ; %s\n" , $cmd , $rem;
    }
    else
    {
-      print CFG "$cmd\n";
+      print $CFG "$cmd\n";
    }
 }
 
@@ -625,7 +670,7 @@ sub confwrite
    my $log;
    if ($file0 && -e 'bpq32.cfg')
    {
-      system("mv bpq32.cfg $file0");
+      sys("mv bpq32.cfg $file0","Config backup");
       $log .= "Renamed existing bpq32.cfg to $file0\n";
    }
 
@@ -679,12 +724,12 @@ sub confwrite
 
    #  Write configuration
    $log .= "Wrote bpq32.cfg\n";
-   open(CFG , ">bpq32.cfg") || die "Cannot open file bpq32.cfg\n";
+   open($CFG , ">bpq32.cfg") || die "Cannot open file bpq32.cfg\n";
    WriteLine("; $tla $services config File");
    WriteLine("");
    WriteLine("SIMPLE","This set a whole load of paramters to reasonable defaults");
    WriteLine("NODECALL=$call-7","Default node callsign");
-   WriteLine("LOCATOR=$loc","Defailt node location");
+   WriteLine("LOCATOR=$loc","Default node location");
    $BBS  && WriteLine("LINMAIL","Enable BBS");
    $CHAT && WriteLine("LINCHAT","Enable CHAT");
    WriteLine("");
@@ -750,14 +795,40 @@ sub confwrite
          WriteLine("   COMPORT=/dev/ttyUSB$dnum","USB port");
          WriteLine("   SPEED=$spd","USB port speed");
       }
-      else
+      elsif ($type eq 'I2C')
       {
          WriteLine("   TYPE=I2C","I2C connection");
          WriteLine("   I2CBUS=1","I2C Bus number");
          WriteLine("   I2CDEVICE=$dnum","I2C Device number (decimal)");
       }
-      WriteLine("   PROTOCOL=KISS","KISS protocol");
-      WriteLine("   KISSOPTIONS=PITNC,NOPARAMS","KISS options for TNC");
+      elsif ($type eq 'KISS TCP')
+      {
+         my $host = $conf{PORT}{$port}{'TCP Host'};
+         my $tcp  = $conf{PORT}{$port}{'TCP Port'};
+         WriteLine("   TYPE=KISSTCP","KISS over TCP");
+         WriteLine("   KISSHOST=$host","KISS TCP host");
+         WriteLine("   KISSPORT=$tcp","KISS TCP port");
+      }
+      elsif ($type eq 'AGW PE')
+      {
+         my $host = $conf{PORT}{$port}{'AGW Host'};
+         my $tcp  = $conf{PORT}{$port}{'AGW Port'};
+         WriteLine("   TYPE=AGW","AGW Packet Engine");
+         WriteLine("   AGWHOST=$host","AGW host");
+         WriteLine("   AGWPORT=$tcp","AGW port");
+      }
+      elsif ($type eq 'AX.25')
+      {
+         my $iface = $conf{PORT}{$port}{'AX.25 Iface'};
+         WriteLine("   TYPE=AX25","Linux AX.25 interface");
+         WriteLine("   AX25PORT=$iface","AX.25 interface name");
+      }
+      if ($type eq 'Serial' || $type eq 'USB' || $type eq 'I2C')
+      {
+         WriteLine("   PROTOCOL=KISS","KISS protocol");
+         my $kissopts = $conf{PORT}{$port}{'KISS Options'} || 'PITNC,NOPARAMS';
+         WriteLine("   KISSOPTIONS=$kissopts","KISS options for TNC");
+      }
       WriteLine("   CHANNEL=A","TNC channel");
       WriteLine("   MAXFRAME=2","Max outstanding frames");
       WriteLine("   FRACK=7000","Level 2 timeout (ms)");
@@ -795,7 +866,7 @@ sub confwrite
    WriteLine("   LOGINPROMPT=user:","Telnet login prompt");
    WriteLine("   PASSWORDPROMPT=password:","Telnet password prompt");
    WriteLine("   LOCALECHO=NO","Do not echo input");
-   WriteLine("   MAXSESSIONS=10","Maxmimum simultaneous connections");
+   WriteLine("   MAXSESSIONS=10","Maximum simultaneous connections");
    WriteLine("   CTEXT=$tla BPQ32 Telnet Server\\nEnter ? for list of commands\\n\\n","Telnet connect message");
    foreach my $user (@users)
    {
@@ -892,94 +963,100 @@ sub confwrite
    $BBS  && WriteLine("APPLICATION $BBS,BBS,,$call-1,${tla}BBS,255","BBS Application");
    $CMS  && WriteLine("APPLICATION $CMS,RMS,C $tcp CMS,$call-10,${tla}RMS,255","CMS Application");
    $CHAT && WriteLine("APPLICATION $CHAT,CHAT,,$call-11,${tla}CHT,255","CHAT Application");
-   WriteLine("APPLICATION 32,TALK,,$call","Node Application");
-   close(CFG);
+    WriteLine("APPLICATION 32,TALK,,$call","Node Application");
+    if (%alias)
+    {
+       WriteLine("");
+       WriteLine(";**********  Node Aliases  **********");
+       foreach my $alias (sort keys %alias)
+       {
+          my ($name,$node,$qual) = map {$_->{VALUE}} @{$alias{$alias}};
+          WriteLine("ALIAS $name=$node $qual","Node alias $name");
+       }
+    }
+    close($CFG);
 
    #  linmail.cfg
    my $file = 'linmail.cfg';
    my $str  = "BBSApplNum = $BBS;";
-   #  No BBS is inactive
-   if (!$BBS)
-   {
-   }
-   #  Write linmail.cfg skeleton
-   elsif (!(-e $file))
+    #  Write linmail.cfg skeleton
+    if (!(-e $file))
    {
       $log .= "Wrote $file\n";
       my $sysop = @sysop ? $sysop[0] : '';
-      open(CFG , ">$file") || die "Cannot open file $file\n";
-      print CFG "main : \n";
-      print CFG "{\n";
-      print CFG "  Streams = 32;\n";
-      print CFG "  BBSApplNum = $BBS;\n";
-      print CFG "  BBSName = \"$call\";\n";
-      print CFG "  SYSOPCall = \"$sysop\";\n";
-      print CFG "  EnableUI = 1;\n";
-      print CFG "  RefuseBulls = 0;\n";
-      print CFG "  SendSYStoSYSOPCall = 1;\n";
-      print CFG "  SendBBStoSYSOPCall = 1;\n";
-      print CFG "  DontHoldNewUsers = 1;\n";
-      print CFG "  AllowAnon = 1;\n";
-      print CFG "  DontNeedHomeBBS = 1;\n";
-      print CFG "  ForwardToMe = 1;\n";
-      print CFG "  MaxTXSize = 100000;\n";
-      print CFG "  MaxRXSize = 100000;\n";
-      print CFG "};\n";
-      print CFG "BBSForwarding : \n";
-      print CFG "{\n";
-      print CFG "  RMS : \n";
-      print CFG "  {\n";
-      print CFG "    TOCalls = \"RMS\";\n";
-      print CFG "    ConnectScript = \"RMS\";\n";
-      print CFG "    ATCalls = \"\";\n";
-      print CFG "    HRoutes = \"\";\n";
-      print CFG "    HRoutesP = \"\";\n";
-      print CFG "    FWDTimes = \"\";\n";
-      print CFG "    Enabled = 1;\n";
-      print CFG "    RequestReverse = 1;\n";
-      print CFG "    AllowCompressed = 1;\n";
-      print CFG "    UseB1Protocol = 0;\n";
-      print CFG "    UseB2Protocol = 1;\n";
-      print CFG "    SendCTRLZ = 0;\n";
-      print CFG "    FWDPersonalsOnly = 0;\n";
-      print CFG "    FWDNewImmediately = 1;\n";
-      print CFG "    FwdInterval = 3600;\n";
-      print CFG "    RevFWDInterval = 3600;\n";
-      print CFG "    MaxFBBBlock = 10000;\n";
-      print CFG "    BBSHA = \"\";\n";
-      print CFG "  };\n";
-      print CFG "};\n";
-      print CFG "Housekeeping : \n";
-      print CFG "{\n";
-      print CFG "  MaxMsgno = 60000;\n";
-      print CFG "  BidLifetime = 60;\n";
-      print CFG "  MaxAge = 60;\n";
-      print CFG "  LogLifetime = 7;\n";
-      print CFG "  MaintInterval = 24;\n";
-      print CFG "  UserLifetime = 0;\n";
-      print CFG "  MaintTime = 1000;\n";
-      print CFG "  PR = 30;\n";
-      print CFG "  PUR = 30;\n";
-      print CFG "  PF = 30;\n";
-      print CFG "  PNF = 999;\n";
-      print CFG "  BF = 30;\n";
-      print CFG "  BNF = 999;\n";
-      print CFG "  NTSD = 30;\n";
-      print CFG "  NTSF = 30;\n";
-      print CFG "  NTSU = 999;\n";
-      print CFG "  DeletetoRecycleBin = 0;\n";
-      print CFG "  SuppressMaintEmail = 1;\n";
-      print CFG "  MaintSaveReg = 0;\n";
-      print CFG "  OverrideUnsent = 0;\n";
-      print CFG "  SendNonDeliveryMsgs = 1;\n";
-      print CFG "};\n";
-      close(CFG);
+      open($CFG , ">$file") || die "Cannot open file $file\n";
+      print $CFG "main : \n";
+      print $CFG "{\n";
+      print $CFG "  Streams = 32;\n";
+      print $CFG "  BBSApplNum = $BBS;\n";
+      print $CFG "  BBSName = \"$call\";\n";
+      print $CFG "  SYSOPCall = \"$sysop\";\n";
+      print $CFG "  EnableUI = 1;\n";
+      print $CFG "  RefuseBulls = 0;\n";
+      print $CFG "  SendSYStoSYSOPCall = 1;\n";
+      print $CFG "  SendBBStoSYSOPCall = 1;\n";
+      print $CFG "  DontHoldNewUsers = 1;\n";
+      print $CFG "  AllowAnon = 1;\n";
+      print $CFG "  DontNeedHomeBBS = 1;\n";
+      print $CFG "  ForwardToMe = 1;\n";
+      print $CFG "  MaxTXSize = 100000;\n";
+      print $CFG "  MaxRXSize = 100000;\n";
+      print $CFG "};\n";
+      print $CFG "BBSForwarding : \n";
+      print $CFG "{\n";
+      print $CFG "  RMS : \n";
+      print $CFG "  {\n";
+      print $CFG "    TOCalls = \"RMS\";\n";
+      print $CFG "    ConnectScript = \"RMS\";\n";
+      print $CFG "    ATCalls = \"\";\n";
+      print $CFG "    HRoutes = \"\";\n";
+      print $CFG "    HRoutesP = \"\";\n";
+      print $CFG "    FWDTimes = \"\";\n";
+      print $CFG "    Enabled = 1;\n";
+      print $CFG "    RequestReverse = 1;\n";
+      print $CFG "    AllowCompressed = 1;\n";
+      print $CFG "    UseB1Protocol = 0;\n";
+      print $CFG "    UseB2Protocol = 1;\n";
+      print $CFG "    SendCTRLZ = 0;\n";
+      print $CFG "    FWDPersonalsOnly = 0;\n";
+      print $CFG "    FWDNewImmediately = 1;\n";
+      print $CFG "    FwdInterval = 3600;\n";
+      print $CFG "    RevFWDInterval = 3600;\n";
+      print $CFG "    MaxFBBBlock = 10000;\n";
+      print $CFG "    BBSHA = \"\";\n";
+      print $CFG "  };\n";
+      print $CFG "};\n";
+      print $CFG "Housekeeping : \n";
+      print $CFG "{\n";
+      print $CFG "  MaxMsgno = 60000;\n";
+      print $CFG "  BidLifetime = 60;\n";
+      print $CFG "  MaxAge = 60;\n";
+      print $CFG "  LogLifetime = 7;\n";
+      print $CFG "  MaintInterval = 24;\n";
+      print $CFG "  UserLifetime = 0;\n";
+      print $CFG "  MaintTime = 1000;\n";
+      print $CFG "  PR = 30;\n";
+      print $CFG "  PUR = 30;\n";
+      print $CFG "  PF = 30;\n";
+      print $CFG "  PNF = 999;\n";
+      print $CFG "  BF = 30;\n";
+      print $CFG "  BNF = 999;\n";
+      print $CFG "  NTSD = 30;\n";
+      print $CFG "  NTSF = 30;\n";
+      print $CFG "  NTSU = 999;\n";
+      print $CFG "  DeletetoRecycleBin = 0;\n";
+      print $CFG "  SuppressMaintEmail = 1;\n";
+      print $CFG "  MaintSaveReg = 0;\n";
+      print $CFG "  OverrideUnsent = 0;\n";
+      print $CFG "  SendNonDeliveryMsgs = 1;\n";
+      print $CFG "};\n";
+      close($CFG);
    }
    #  Make sure BBS application number is correct
    elsif (!(`grep '$str' $file`))
    {
       $log .= "Update BBS application number in $file\n";
-      system("sed -i -e 's/BBSApplNum *=.*;/$str/' $file");
+      sys("sed -i -e 's/BBSApplNum *=.*;/$str/' $file","BBS app num update");
    }
 
    #  Write users file
@@ -990,8 +1067,8 @@ sub confwrite
    unless (-e $file)
    {
       $log .= "Wrote $file\n";
-      open(DAT , ">$file") || die "Cannot open file $file\n";
-      binmode(DAT);
+      open($DAT , ">$file") || die "Cannot open file $file\n";
+      binmode($DAT);
       my @call = ($call,grep {$_ ne $call} @sysop);
       $CMS && push @call , 'RMS';
       foreach my $c ('',@call)
@@ -1011,9 +1088,9 @@ sub confwrite
             (grep {$_ eq $c} @sysop) && ($buf[5] |= 8);
          }
          #  Write record (call,record length,lots of other stuff)
-         print DAT pack('Z10S*',$c,464,@buf);
+         print $DAT pack('Z10S*',$c,464,@buf);
       }
-      close(DAT);
+      close($DAT);
    }
 
    #  Write bpq.service if needed
@@ -1022,21 +1099,21 @@ sub confwrite
    unless ((-e $file) && (`grep '$str' $file`))
    {
       $log .= "Wrote $file\n";
-      open(DAT , ">$file") || die "Cannot open file $file\n";
-      print DAT "[Unit]\n";
-      print DAT "Description=BPQ\n";
-      print DAT "ConditionPathExists=|$pwd\n";
-      print DAT "After=network.target\n";
-      print DAT "\n";
-      print DAT "[Service]\n";
-      print DAT "WorkingDirectory=$pwd\n";
-      print DAT "ExecStart$str\n";
-      print DAT "Restart=always\n";
-      print DAT "SyslogIdentifier=BPQ\n";
-      print DAT "\n";
-      print DAT "[Install]\n";
-      print DAT "WantedBy=multi-user.target\n";
-      close(DAT);
+      open($DAT , ">$file") || die "Cannot open file $file\n";
+      print $DAT "[Unit]\n";
+      print $DAT "Description=BPQ\n";
+      print $DAT "ConditionPathExists=|$pwd\n";
+      print $DAT "After=network.target\n";
+      print $DAT "\n";
+      print $DAT "[Service]\n";
+      print $DAT "WorkingDirectory=$pwd\n";
+      print $DAT "ExecStart$str\n";
+      print $DAT "Restart=always\n";
+      print $DAT "SyslogIdentifier=BPQ\n";
+      print $DAT "\n";
+      print $DAT "[Install]\n";
+      print $DAT "WantedBy=multi-user.target\n";
+      close($DAT);
    }
 
    #  minicom configuration file
@@ -1045,9 +1122,9 @@ sub confwrite
    unless ((-e $file) && (`grep '$str' $file`))
    {
       $log .= "Wrote $file\n";
-      open(DAT , ">$file") || die "Cannot open file $file\n";
-      print DAT "pu $str\n";
-      close(DAT);
+      open($DAT , ">$file") || die "Cannot open file $file\n";
+      print $DAT "pu $str\n";
+      close($DAT);
    }
 
    #  minicom startup file
@@ -1055,15 +1132,15 @@ sub confwrite
    unless (-e $file)
    {
       $log .= "Wrote $file\n";
-      open(DAT , ">$file") || die "Cannot open file $file\n";
-      print DAT "send \"^C\"\n";
-      print DAT "send \"D\"\n";
-      print DAT "send \"\"\n";
-      print DAT "send \"auto on\"\n";
-      print DAT "send \"echo on\"\n";
-      print DAT "send \"conok on\"\n";
-      print DAT "send \"cbell on\"\n";
-      close(DAT);
+      open($DAT , ">$file") || die "Cannot open file $file\n";
+      print $DAT "send \"^C\"\n";
+      print $DAT "send \"D\"\n";
+      print $DAT "send \"\"\n";
+      print $DAT "send \"auto on\"\n";
+      print $DAT "send \"echo on\"\n";
+      print $DAT "send \"conok on\"\n";
+      print $DAT "send \"cbell on\"\n";
+      close($DAT);
    }
 
    #  bterm command to access BPQ from minicom
@@ -1072,44 +1149,63 @@ sub confwrite
    unless ((-e $file) && (`grep '$str' $file`))
    {
       $log .= "Wrote $file\n";
-      open(DAT , ">$file") || die "Cannot open file $file\n";
-      print DAT "minicom -$str\n";
-      close(DAT);
+      open($DAT , ">$file") || die "Cannot open file $file\n";
+      print $DAT "minicom -$str\n";
+      close($DAT);
       chmod 0755 , $file;
    }
 
    #  Save configuration
    $CRC16 = filehash('bpq32.cfg');
-   open(CFG , '>.bpqconfig') || die "Cannot open file .bpqconfig\n";
-   printf CFG "CRC16\t%d\n" , $CRC16;
+   open($CFG , '>.bpqconfig') || die "Cannot open file .bpqconfig\n";
+   printf $CFG "CRC16\t%d\n" , $CRC16;
    for (my $k=0;$k<@sys;$k++)
    {
-      printf CFG "%s\t%s\n" , $sys[$k]{ITEM},$sys[$k]{VALUE};
+      printf $CFG "%s\t%s\n" , $sys[$k]{ITEM},$sys[$k]{VALUE};
    }
    foreach my $port (sort keys %port)
    {
-      printf CFG "[%s]\n" , $port;
+      printf $CFG "[%s]\n" , $port;
       my @port = @{$port{$port}};
       for (my $k=0;$k<@port;$k++)
       {
-         printf CFG "%s\t%s\n" , $port[$k]{ITEM},$port[$k]{VALUE};
+         printf $CFG "%s\t%s\n" , $port[$k]{ITEM},$port[$k]{VALUE};
       }
    }
-   foreach my $node (sort keys %map)
+    foreach my $node (sort keys %map)
+    {
+       printf $CFG "<".join("\t",map {$_->{VALUE}} @{$map{$node}}).">\n";
+    }
+    foreach my $aname (sort keys %alias)
+    {
+       printf $CFG "(".join("\t",map {$_->{VALUE}} @{$alias{$aname}}).")\n";
+    }
+    foreach my $user (sort keys %user)
    {
-      printf CFG "<".join("\t",map {$_->{VALUE}} @{$map{$node}}).">\n";
+      printf $CFG "{".join("\t",map {$_->{VALUE}} @{$user{$user}})."}\n";
    }
-   foreach my $user (sort keys %user)
-   {
-      printf CFG "{".join("\t",map {$_->{VALUE}} @{$user{$user}})."}\n";
-   }
-   close(CFG);
+    close($CFG);
 
-   message("bpq-config save",$log);
+    #  Validate config if pilinbpq is available
+    if (-e 'pilinbpq')
+    {
+       my $val = `./pilinbpq -validate bpq32.cfg 2>&1`;
+       if ($?)
+       {
+          $log .= "Config validation FAILED:\n$val\n";
+          message("Config Error","$val");
+       }
+       else
+       {
+          $log .= "Config validation passed.\n";
+       }
+    }
 
-   #  Saved
-   $save = 0;
-   return 4;
+    message("bpq-config save",$log);
+
+    #  Saved
+    $save = 0;
+    return 4;
 }
 
 #  Assign value
@@ -1151,10 +1247,11 @@ sub readconfig
    %port = ();
    %user = ();
    %map = ();
+   %alias = ();
    (-e '.bpqconfig') || return;
-   open(CFG , '<.bpqconfig') || die "Cannot open file .bpqconfig\n";
+   open(my $cfg , '<.bpqconfig') || die "Cannot open file .bpqconfig\n";
    my $tab = \@sys;
-   while (my $line = <CFG>)
+   while (my $line = <$cfg>)
    {
       chomp $line;
       #  Port
@@ -1164,12 +1261,17 @@ sub readconfig
          $port{$port} = [rehash(@radio)];
          $tab = $port{$port};
       }
-      #  AXIP node map
-      elsif ($line =~ /^<(.*)>$/)
-      {
-         readlist($1,\%map,@map);
-      }
-      #  Telnet users
+       #  AXIP node map
+       elsif ($line =~ /^<(.*)>$/)
+       {
+          readlist($1,\%map,@map);
+       }
+       #  Node aliases
+       elsif ($line =~ /^\((.*)\)$/)
+       {
+          readlist($1,\%alias,@alias);
+       }
+       #  Telnet users
       elsif ($line =~ /^{(.*)}$/)
       {
          readlist($1,\%user,@user);
@@ -1185,8 +1287,8 @@ sub readconfig
          my ($key,$val) = split("\t",$line);
          setval($key,$val,$tab);
       }
-   }
-   close(CFG);
+    }
+    close($cfg);
 }
 
 #
@@ -1240,7 +1342,7 @@ if (@prog)
 {
    my $sel = choice("BPQ Configuration",join(' and ',@prog)." is not installed.\nSelect Install to install, or Quit to install them yourself.",'Install','Quit');
    ($sel eq 'Quit') && exit(0);
-   system("apt-get update;apt-get -y install @prog");
+   sys("apt-get update;apt-get -y install @prog","Install prerequisites");
 }
 
 #
@@ -1254,14 +1356,14 @@ if (!$bb)
    {
       my $sel = choice("BPQ Configuration","Serial port must be enabled.",'Enable','Abort');
       ($sel =~ /Abort/) && exit(0);
-      system('sed -i -e "s/enable_uart=0/enable_uart=1/" /boot/config.txt');
+      sys('sed -i -e "s/enable_uart=0/enable_uart=1/" /boot/config.txt','Enable UART');
       $reboot = 1;
    }
    elsif (!(`grep "enable_uart=1" /boot/config.txt`))
    {
       my $sel = choice("BPQ Configuration","Serial port must be enabled.",'Enable','Abort');
       ($sel =~ /Abort/) && exit(0);
-      system('echo "enable_uart=1" >> /boot/config.txt');
+      sys('echo "enable_uart=1" >> /boot/config.txt','Enable UART');
       $reboot = 1;
    }
    # Disable bluetooth
@@ -1269,7 +1371,7 @@ if (!$bb)
    {
       my $sel = choice("BPQ Configuration","bluetooth is enabled, which conflicts with BPQ.",'Disable','Abort');
       ($sel =~ /Abort/) && exit(0);
-      system('echo "dtoverlay=pi3-disable-bt" >> /boot/config.txt');
+      sys('echo "dtoverlay=pi3-disable-bt" >> /boot/config.txt','Disable bluetooth');
       $reboot = 1;
    }
    #  Disable bluetooth-serial interface
@@ -1277,7 +1379,7 @@ if (!$bb)
    {
       my $sel = choice("BPQ Configuration","The hciuart service is enabled, which conflicts with BPQ.",'Disable','Abort');
       ($sel =~ /Abort/) && exit(0);
-      system('systemctl disable hciuart');
+      sys('systemctl disable hciuart','Disable hciuart');
       $reboot = 1;
    }
    #  Disable serial login
@@ -1285,7 +1387,7 @@ if (!$bb)
    {
       my $sel = choice("BPQ Configuration","The serial getty service is enabled, which conflicts with BPQ.",'Disable','Abort');
       ($sel =~ /Abort/) && exit(0);
-      system('systemctl mask serial-getty@ttyAMA0.service');
+      sys('systemctl mask serial-getty@ttyAMA0.service','Mask serial-getty');
       $reboot = 1;
    }
 }
@@ -1294,7 +1396,7 @@ if ($reboot)
 {
    my $sel = choice("BPQ Configuration","Reboot required to have changes take effect.\n\nAfter the reboot, please run bpq-config again.",'Reboot','Abort');
    ($sel =~ /Abort/) && exit(0);
-   system('reboot');
+   sys('reboot','Reboot');
 }
 
 #
@@ -1305,7 +1407,7 @@ if (@ARGV>0  && $ARGV[0] eq '-u')
    warn "Updating Software\n\n";
    download();
    warn "\nRestarting BPQ\n";
-   system('systemctl restart bpq.service');
+   sys('systemctl restart bpq.service','Restart BPQ');
    exit;
 }
 
@@ -1317,7 +1419,8 @@ sub howcon
    my $IP = 'localhost';
    foreach my $addr (split(' ',`hostname -I`))
    {
-      ($addr =~ /^(\d+\.\d+\.\d+\.\d+)$/) && ($IP = $addr) && last;
+      next if ($addr eq '127.0.0.1' || $addr eq '::1');
+      ($addr =~ /^(\d+\.\d+\.\d+\.\d+)$/ || $addr =~ /^[0-9a-f:]+$/i) && ($IP = $addr) && last;
    }
    return "Connect to BPQ with a web browser as\n  http://$IP:8008/\nor\n  telnet $IP 8010\n";
 }
@@ -1373,7 +1476,7 @@ if ($quick)
    #  Write configuration
    confwrite();
    #  Start BPQ
-   system('systemctl start bpq.service');
+   sys('systemctl start bpq.service','Start BPQ');
    my $howcon = howcon();
    my $act = choice('Quick Start',"BPQ started.\n\n$howcon\nIf that works enable it to start on boot.",'Continue','Abort Quick Start');
    ($act =~ /Abort/) && exit(0);
@@ -1443,7 +1546,107 @@ for (my $run=1;$run;)
    {
       my $cmd = "systemctl $step bpq.service";
       warn "$cmd\n";
-      system($cmd);
+      sys($cmd,"systemctl $step");
       sleep 3;
    }
 }
+
+__END__
+
+=head1 NAME
+
+bpq-config - Interactive configuration tool for BPQ32 on Raspberry Pi / BeagleBone
+
+=head1 SYNOPSIS
+
+bpq-config [B<-h>] [B<-q>] [B<-u>] [B<-o>|B<--offline>]
+
+=head1 DESCRIPTION
+
+bpq-config is an interactive menu-driven program that guides you through
+configuring BPQ32 packet radio node software on Raspberry Pi and BeagleBone
+single-board computers.
+
+It can generate a complete bpq32.cfg, linmail.cfg, BPQBBSUsers.dat,
+and systemd service configuration.
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-h>
+
+Display help and exit.
+
+=item B<-q>
+
+Quick start. Forces a fresh configuration from scratch. If a configuration
+already exists, asks to erase it first.
+
+=item B<-u>
+
+Update BPQ software (pilinbpq, HTML pages, TNC params, APRS tools) and
+restart the BPQ service. Non-interactive.
+
+=item B<-o>, B<--offline>
+
+Skip self-update from prinmath.com. Use when testing modifications to
+bpq-config itself. All other downloads (pilinbpq, HTML, etc.) still occur.
+
+The environment variable C<BPQ_OFFLINE> can also be set to enable this mode.
+
+=item (no arguments)
+
+Interactive mode. Presents a menu to download/update BPQ, configure the
+node, or check status.
+
+=back
+
+=head1 FILES
+
+=over 8
+
+=item F<bpq32.cfg>
+
+Generated BPQ32 configuration file.
+
+=item F<linmail.cfg>
+
+Generated BBS configuration file.
+
+=item F<.bpqconfig>
+
+Internal state file. Stores the last configuration values so they can be
+re-loaded on subsequent runs.
+
+=item F</lib/systemd/system/bpq.service>
+
+Systemd service file for auto-starting BPQ on boot.
+
+=back
+
+=head1 ENVIRONMENT
+
+=over 8
+
+=item C<BPQ_OFFLINE>
+
+When set to a truthy value, disables the prinmath.com self-update check
+(same as B<--offline>).
+
+=back
+
+=head1 BUGS
+
+Please report issues at the project repository.
+
+=head1 LICENSE
+
+GNU General Public License.
+
+=head1 AUTHOR
+
+Willem A. Schreuder AC0KQ - Original author
+Joey Stanford NV0N - v1.1.0 maintenance and features
+
+=cut

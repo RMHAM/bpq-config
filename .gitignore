@@ -1,1 +1,14 @@
 .DS_Store
+*.cfg
+*.dat
+*.bak
+*~
+pilinbpq
+pitnc_*
+piBPQAPRS
+minicombpq
+BPQAPRS/
+HTML/
+minirc.bpq
+.bpqconfig
+com10
