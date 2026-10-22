@@ -36,12 +36,15 @@
 #  Version 1.0.16 25-May-2023  Add libpcap0.8 to prerequisites
 #  Version 1.1.0   6-Jun-2026  Offline flag, hardening, new features (Joey Stanford NV0N)
 #  Version 1.1.1  22-Oct-2026  Keep existing files when a download fails (403 etc.)
-#  Version 1.1.2  22-Oct-2026  Self-update from the RMHAM GitHub repo
+#  Version 1.1.3  22-Oct-2026  Send a User-Agent, allow a download mirror
 
 use strict;
 use warnings;
 
-my $ver = '1.1.2';
+my $ver = '1.1.3';
+
+#  Identify ourselves to download hosts
+my $ua = 'bpq-config (+https://github.com/RMHAM/bpq-config)';
 
 my $about =
   "Interactive program to configure BPQ32.\n".
@@ -213,7 +216,7 @@ sub filehash
 {
    my ($file) = @_;
    my $text;
-   open(my $fh , "<$file") || return 0;
+   open(my $fh , '<' , $file) || return 0;
    while (my $line = <$fh>)
    {
       #  Remove comments
@@ -353,22 +356,22 @@ sub message
 #  YesNo
 sub yesno
 {
-   my ($title,$message,$no) = @_;
-   $no = $no ? '--defaultno' : '';
-   whiptail("--title '$title' --yesno '$message' 9 60 $no");
+   my ($title,$message,$defaultno) = @_;
+   $defaultno = $defaultno ? '--defaultno' : '';
+   whiptail("--title '$title' --yesno '$message' 9 60 $defaultno");
    return $? ? 'No' : 'Yes';
 }
 
 #  Choice
 sub choice
 {
-   my ($title,$message,$yes,$no) = @_;
+   my ($title,$message,$yes,$nobutton) = @_;
    my @lines = split("\n",$message);
    my $rows = @lines+8;
    my $Rows = ($rows<$Rmax) ? $rows : $Rmax;
    my $scroll = ($Rows>=$Rmax) ? '--scrolltext' : '';
-   whiptail("--title '$title' --yes-button '$yes' --no-button '$no' --yesno '$message' $Rows 60 $scroll");
-   return $? ? $no  : $yes;
+   whiptail("--title '$title' --yes-button '$yes' --no-button '$nobutton' --yesno '$message' $Rows 60 $scroll");
+   return $? ? $nobutton  : $yes;
 }
 
 #  Find menu item
@@ -379,7 +382,7 @@ sub find
    {
       ($item eq $list[$k]{$field}) && return $k;
    }
-   return undef;
+   return;
 }
 
 #  Input
@@ -406,6 +409,7 @@ sub input
          $prompt = "$txt is invalid.\nEnter $item{ITEM} $item{TXT}";
       }
    }
+   return;
 }
 
 #  Return conditionals from table
@@ -456,6 +460,7 @@ sub sys
    my ($cmd,$desc) = @_;
    $desc ||= $cmd;
    system($cmd) && warn "sys: $desc failed (exit " . ($? >> 8) . ")\n";
+   return;
 }
 
 #
@@ -493,13 +498,13 @@ sub samefile
    open(my $fb,'<',$b) || return 0;
    binmode($fa);
    binmode($fb);
-   my ($ba,$bb) = ('','');
+   my ($ba,$chunkb) = ('','');
    my $same = 1;
    while ($same)
    {
       my $ra = read($fa,$ba,65536);
-      my $rb = read($fb,$bb,65536);
-      if (!defined($ra) || !defined($rb) || $ra != $rb || $ba ne $bb)
+      my $rb = read($fb,$chunkb,65536);
+      if (!defined($ra) || !defined($rb) || $ra != $rb || $ba ne $chunkb)
       {
          $same = 0;
       }
@@ -522,7 +527,7 @@ sub fetch
    my %magic = (elf=>"\x7fELF",zip=>"PK\x03\x04",script=>'#!');
    my $tmp = "$dest.download.$$";
    unlink $tmp;
-   my $rc = system('wget','-q','-O',$tmp,$url);
+   my $rc = system('wget','-q','--user-agent',$ua,'-O',$tmp,$url);
    my $ok = ($rc == 0);
    if (!$ok)
    {
@@ -589,7 +594,7 @@ sub selfupdate
    {
       warn "fetch: Self-update failed (cannot create $dir)\n";
    }
-   elsif (system('wget','-q','-O',$tmp,$url))
+   elsif (system('wget','-q','--user-agent',$ua,'-O',$tmp,$url))
    {
       warn "fetch: Self-update failed (wget exit " . ($? >> 8) . "): $url\n";
    }
@@ -620,7 +625,8 @@ sub selfupdate
 #
 sub download
 {
-   my $base = 'https://www.cantab.net/users/john.wiseman';
+   my $base = $ENV{BPQ_MIRROR} || 'https://www.cantab.net/users/john.wiseman';
+   $base =~ s{/+$}{};
    $failed = 0;
    #  Mirror bpq-config (skip if offline)
    if (!$offline)
@@ -674,8 +680,9 @@ sub download
    if ($failed)
    {
       warn "\ndownload: $failed item(s) failed - existing files were kept.\n";
-      warn "download: a 403 from cantab.net means the download host is refusing all\n";
-      warn "download: requests; retry later, or install the files by hand.\n";
+      warn "download: a 403 means the download host is refusing all requests;\n";
+      warn "download: retry later, or set BPQ_MIRROR to a host that serves the\n";
+      warn "download: same files, or install the files by hand.\n";
    }
    return !$failed;
 }
@@ -734,6 +741,7 @@ sub conflist
          $key && ($$ptr{$key} = [@tab]);
       }
    }
+   return;
 }
 
 #  Main configuration steps
@@ -776,6 +784,7 @@ sub configure
           confwrite($file0);
        }
    }
+   return;
 }
 
 #
@@ -792,6 +801,7 @@ sub WriteLine
    {
       print $CFG "$cmd\n";
    }
+   return;
 }
 
 #
@@ -830,8 +840,8 @@ sub confwrite
    my $aprs=0;
    foreach my $port (sort keys %port)
    {
-      my ($key,%table) = confcheck(@{$port{$port}});
-      $key && message('Install',"Please complete $port configuration before writing.\n$key is still missing.") && return 2;
+      my ($badport,%table) = confcheck(@{$port{$port}});
+      $badport && message('Install',"Please complete $port configuration before writing.\n$badport is still missing.") && return 2;
       $conf{PORT}{$port} = \%table;
       ($conf{PORT}{$port}{Type} =~ /APRS/) && $aprs++;
    }
@@ -842,16 +852,16 @@ sub confwrite
    #  Check telnet user configuration
    foreach my $user (sort keys %user)
    {
-      my ($key,%table) = confcheck(@{$user{$user}});
-      $key && message('Install',"Please complete Telnet user $user configuration before writing.\n$key is still missing.") && return 2;
+      my ($baduser,%table) = confcheck(@{$user{$user}});
+      $baduser && message('Install',"Please complete Telnet user $user configuration before writing.\n$baduser is still missing.") && return 2;
       $conf{USER}{$user} = \%table;
    }
 
    #  Check AXIP node map configuration
    foreach my $node (sort keys %map)
    {
-      my ($key,%table) = confcheck(@{$map{$node}});
-      $key && message('Install',"Please complete AXIP node map for $node configuration before writing.\n$key is still missing.") && return 2;
+      my ($badmap,%table) = confcheck(@{$map{$node}});
+      $badmap && message('Install',"Please complete AXIP node map for $node configuration before writing.\n$badmap is still missing.") && return 2;
       $conf{MAP}{$node} = \%table;
    }
 
@@ -924,7 +934,7 @@ sub confwrite
 
    #  Write configuration
    $log .= "Wrote bpq32.cfg\n";
-   open($CFG , ">bpq32.cfg") || die "Cannot open file bpq32.cfg\n";
+   open($CFG , '>' , 'bpq32.cfg') || die "Cannot open file bpq32.cfg\n";
    WriteLine("; $tla $services config File");
    WriteLine("");
    WriteLine("SIMPLE","This set a whole load of paramters to reasonable defaults");
@@ -1107,9 +1117,9 @@ sub confwrite
       WriteLine("   BROADCAST NODES","Broadcast");
       foreach my $node (sort keys %map)
       {
-         my ($call,$host,$port) = map {$_->{VALUE}} @{$map{$node}};
-         my $map = sprintf 'MAP %-8s %-20s UDP %5d B' , $call , $host , $port;
-         WriteLine("   $map","AXIP to $call");
+         my ($mapcall,$host,$port) = map {$_->{VALUE}} @{$map{$node}};
+         my $map = sprintf 'MAP %-8s %-20s UDP %5d B' , $mapcall , $host , $port;
+         WriteLine("   $map","AXIP to $mapcall");
       }
       WriteLine("ENDPORT");
       WriteLine("");
@@ -1119,7 +1129,7 @@ sub confwrite
    if ($APRS)
    {
       my $ssid = $conf{'APRS SSID'};
-      my $set  = $conf{'APRS Symset'};
+      my $symset = $conf{'APRS Symset'};
       my $sym  = $conf{'APRS Symbol'};
       my $stat = $conf{'Status Message'};
       my $lat  = $conf{'Latitude'};
@@ -1132,18 +1142,18 @@ sub confwrite
       WriteLine("   APRSCALL=$call-$ssid",'APRS callsign');
       foreach my $port (sort keys %port)
       {
-         my $n = $conf{PORT}{$port}{NUM};
+         my $pnum = $conf{PORT}{$port}{NUM};
          if ($conf{PORT}{$port}{Type} =~ /APRS rx/)
          {
-            WriteLine("   APRSPATH $n=",'APRS receive only port');
+            WriteLine("   APRSPATH $pnum=",'APRS receive only port');
          }
          elsif ($conf{PORT}{$port}{Type} =~ /APRS/)
          {
-            WriteLine("   APRSPATH $n=APRS,WIDE1-1,WIDE2-1",'APRS repeater port');
+            WriteLine("   APRSPATH $pnum=APRS,WIDE1-1,WIDE2-1",'APRS repeater port');
          }
       }
       WriteLine("   STATUSMSG=$stat",'APRS status message');
-      WriteLine("   SYMSET=$set",'APRS symbol set');
+      WriteLine("   SYMSET=$symset",'APRS symbol set');
       WriteLine("   SYMBOL=$sym",'APRS icon');
       WriteLine("   LAT=$lat",'Latitude (ddmm.mmN/S)');
       WriteLine("   LON=$lon",'Longitude (dddmm.mmE/W)');
@@ -1184,7 +1194,7 @@ sub confwrite
    {
       $log .= "Wrote $file\n";
       my $sysop = @sysop ? $sysop[0] : '';
-      open($CFG , ">$file") || die "Cannot open file $file\n";
+      open($CFG , '>' , $file) || die "Cannot open file $file\n";
       print $CFG "main : \n";
       print $CFG "{\n";
       print $CFG "  Streams = 32;\n";
@@ -1267,7 +1277,7 @@ sub confwrite
    unless (-e $file)
    {
       $log .= "Wrote $file\n";
-      open($DAT , ">$file") || die "Cannot open file $file\n";
+      open($DAT , '>' , $file) || die "Cannot open file $file\n";
       binmode($DAT);
       my @call = ($call,grep {$_ ne $call} @sysop);
       $CMS && push @call , 'RMS';
@@ -1299,7 +1309,7 @@ sub confwrite
    unless ((-e $file) && (`grep '$str' $file`))
    {
       $log .= "Wrote $file\n";
-      open($DAT , ">$file") || die "Cannot open file $file\n";
+      open($DAT , '>' , $file) || die "Cannot open file $file\n";
       print $DAT "[Unit]\n";
       print $DAT "Description=BPQ\n";
       print $DAT "ConditionPathExists=|$pwd\n";
@@ -1322,7 +1332,7 @@ sub confwrite
    unless ((-e $file) && (`grep '$str' $file`))
    {
       $log .= "Wrote $file\n";
-      open($DAT , ">$file") || die "Cannot open file $file\n";
+      open($DAT , '>' , $file) || die "Cannot open file $file\n";
       print $DAT "pu $str\n";
       close($DAT);
    }
@@ -1332,7 +1342,7 @@ sub confwrite
    unless (-e $file)
    {
       $log .= "Wrote $file\n";
-      open($DAT , ">$file") || die "Cannot open file $file\n";
+      open($DAT , '>' , $file) || die "Cannot open file $file\n";
       print $DAT "send \"^C\"\n";
       print $DAT "send \"D\"\n";
       print $DAT "send \"\"\n";
@@ -1349,7 +1359,7 @@ sub confwrite
    unless ((-e $file) && (`grep '$str' $file`))
    {
       $log .= "Wrote $file\n";
-      open($DAT , ">$file") || die "Cannot open file $file\n";
+      open($DAT , '>' , $file) || die "Cannot open file $file\n";
       print $DAT "minicom -$str\n";
       close($DAT);
       chmod 0755 , $file;
@@ -1357,7 +1367,7 @@ sub confwrite
 
    #  Save configuration
    $CRC16 = filehash('bpq32.cfg');
-   open($CFG , '>.bpqconfig') || die "Cannot open file .bpqconfig\n";
+   open($CFG , '>' , '.bpqconfig') || die "Cannot open file .bpqconfig\n";
    printf $CFG "CRC16\t%d\n" , $CRC16;
    for (my $k=0;$k<@sys;$k++)
    {
@@ -1420,13 +1430,14 @@ sub setval
          return;
       }
    }
+   return;
 }
 
 #  Read list entries
 sub readlist
 {
    my ($line,$list,@list) = @_;
-   my @line = split("\t",$1);
+   my @line = split("\t",$line);
    if (@line==@list)
    {
       my $node = $line[0];
@@ -1436,6 +1447,7 @@ sub readlist
          $$list{$node}[$k]{VALUE} = $line[$k];
       }
    }
+   return;
 }
 
 #
@@ -1449,7 +1461,7 @@ sub readconfig
    %map = ();
    %alias = ();
    (-e '.bpqconfig') || return;
-   open(my $cfg , '<.bpqconfig') || die "Cannot open file .bpqconfig\n";
+   open(my $cfg , '<' , '.bpqconfig') || die "Cannot open file .bpqconfig\n";
    my $tab = \@sys;
    while (my $line = <$cfg>)
    {
@@ -1489,6 +1501,7 @@ sub readconfig
       }
     }
     close($cfg);
+    return;
 }
 
 #
@@ -1816,7 +1829,8 @@ node, or check status.
 Each download is written to a temporary file and only replaces the existing
 copy after it has been validated, so a failed download (for example a 403
 from the host) leaves the current installation untouched instead of
-replacing a working program with an empty or error-page file.
+replacing a working program with an empty or error-page file. Requests are
+sent with a C<bpq-config> User-Agent.
 
 =head1 FILES
 
@@ -1849,6 +1863,15 @@ Systemd service file for auto-starting BPQ on boot.
 
 When set to a truthy value, disables the GitHub self-update check
 (same as B<--offline>).
+
+=item C<BPQ_MIRROR>
+
+Base URL to fetch the BPQ files from instead of
+C<https://www.cantab.net/users/john.wiseman>. The mirror must serve the same
+relative layout: F<Downloads/pilinbpq>, F<Downloads/HTMLPages.zip>,
+F<Downloads/pitnc_getset.zip>, F<Downloads/piBPQAPRS>,
+F<Downloads/LinBPQAPRS.zip> and F<Documents/Samples/APRSHTML.zip>. Use this
+when the upstream host is unavailable, for example when it returns 403.
 
 =back
 

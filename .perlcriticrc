@@ -1,0 +1,37 @@
+# Perl::Critic profile for bpq-config.
+#
+# Medium strictness (severity 3). Real hazards are enforced at their default
+# severity; legacy style choices that would cause large, risky rewrites of the
+# original single-file script are disabled explicitly below.
+
+severity = 3
+
+# Legacy style we do not enforce on this codebase
+[-InputOutput::ProhibitBacktickOperators]
+[-RegularExpressions::RequireExtendedFormatting]
+[-InputOutput::RequireBriefOpen]
+[-ControlStructures::ProhibitCascadingIfElse]
+[-Subroutines::RequireArgUnpacking]
+[-Modules::ProhibitExcessMainComplexity]
+[-Subroutines::ProhibitExcessComplexity]
+[-ErrorHandling::RequireCarping]
+[-BuiltinFunctions::ProhibitComplexMappings]
+
+# Enforced: unsafe or surprising constructs
+[InputOutput::ProhibitTwoArgOpen]
+severity = 5
+
+[Subroutines::ProhibitExplicitReturnUndef]
+severity = 5
+
+[Subroutines::RequireFinalReturn]
+severity = 3
+
+[Variables::ProhibitReusedNames]
+severity = 3
+
+[NamingConventions::ProhibitAmbiguousNames]
+severity = 3
+
+[RegularExpressions::ProhibitCaptureWithoutTest]
+severity = 3

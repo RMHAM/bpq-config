@@ -3,13 +3,15 @@ use strict;
 use warnings;
 use Test::More;
 use File::Temp qw(tempdir);
+use Cwd qw(getcwd);
 
 use lib '.';
 use t::helpers;
 
 # fetch() refers to the file-scoped $failed counter
 our $failed = 0;
-extract_subs(qw(fetch starts samefile));
+our $offline;
+extract_subs(qw(fetch starts samefile download extract selfupdate));
 
 my $dir = tempdir(CLEANUP=>1);
 my $bin = "$dir/bin";
@@ -20,11 +22,19 @@ my $wget = "$bin/wget";
 open(my $fh,'>',$wget) or die "Cannot write $wget: $!";
 print $fh <<'FAKE';
 #!/usr/bin/perl
-my $out;
+my ($out,$ua,$url);
 while (@ARGV)
 {
    my $arg = shift @ARGV;
    $out = shift @ARGV if ($arg eq '-O');
+   $ua = shift @ARGV if ($arg eq '--user-agent');
+   $url = $arg;
+}
+if (my $log = $ENV{FAKE_WGET_LOG})
+{
+   open(my $l,'>>',$log) or exit 1;
+   print $l (($ua || '') . "\t" . ($url || '') . "\n");
+   close($l);
 }
 my $mode = $ENV{FAKE_WGET_MODE} || 'ok';
 exit 8 if ($mode eq '403');
@@ -37,7 +47,7 @@ if ($mode eq 'html')
 }
 elsif ($mode ne 'empty')
 {
-   print $f "\x7fELF\x02\x01\x01";
+   print $f (($url && $url =~ /\.zip$/) ? "PK\x03\x04" : "\x7fELF\x02\x01\x01");
 }
 close($f);
 exit 0;
@@ -135,5 +145,42 @@ $ENV{FAKE_WGET_MODE} = 'network';
 ok(!fetch('http://example.invalid/piBPQAPRS',$fresh,'test','elf'), 'fetch: network failure returns false');
 ok(scalar(grep { /wget exit 4/ } @warn), 'fetch: network failure reports wget exit code');
 is_deeply([glob("$dir/*.download.*")], [], 'fetch: failures leave no temp files');
+
+# The User-Agent is sent with every request
+open(my $log,'>',"$dir/wget.log") or die $!;
+close($log);
+$ENV{FAKE_WGET_LOG} = "$dir/wget.log";
+$ENV{FAKE_WGET_MODE} = 'ok';
+reset_test();
+ok(fetch('http://example.invalid/pilinbpq',"$dir/ua-test",'test','elf'), 'fetch: success with UA logging');
+my @logged = do { open(my $l,'<',"$dir/wget.log"); <$l> };
+like($logged[0] // '', qr/^bpq-config .*\thttp:/, 'fetch: sends a bpq-config User-Agent');
+
+# download() honours BPQ_MIRROR and requests every file from it
+my $unzip = "$bin/unzip";
+open(my $uz,'>',$unzip) or die $!;
+print $uz "#!/bin/sh\nexit 0\n";
+close($uz);
+chmod(0755,$unzip);
+
+my $work = "$dir/work";
+mkdir $work or die $!;
+my $origin = getcwd();
+chdir $work or die $!;
+open($log,'>',"$dir/mirror.log") or die $!;
+close($log);
+$ENV{FAKE_WGET_LOG} = "$dir/mirror.log";
+$ENV{FAKE_WGET_MODE} = 'ok';
+$ENV{BPQ_MIRROR} = 'http://mirror.example/bpq';
+$offline = 1;
+reset_test();
+my $dl = download();
+my @urls = map { chomp; (split /\t/)[1] } do { open(my $l,'<',"$dir/mirror.log"); <$l> };
+is($dl, 1, 'download: succeeds against the mirror');
+is(scalar(@urls), 6, 'download: requests all six items');
+is(scalar(grep { m{^http://mirror\.example/bpq/} } @urls), 6, 'download: every request uses BPQ_MIRROR');
+ok(!(grep { /cantab\.net/ } @urls), 'download: no request goes to cantab.net');
+ok((-e 'pilinbpq'), 'download: installs pilinbpq from the mirror');
+chdir $origin or die $!;
 
 done_testing();

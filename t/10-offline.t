@@ -11,8 +11,8 @@ is($?, 0, 'offline: BPQ_OFFLINE=1 does not break syntax check');
 
 # Verify that the offline flag gets parsed by checking how -o interacts with -h
 $result = `perl bpq-config -o -h 2>&1`;
-like($result, qr/Version 1\.1\.2/, 'offline: -o + -h shows version');
+like($result, qr/Version 1\.1\.3/, 'offline: -o + -h shows version');
 
 # Test that --offline + -h also works
 $result = `perl bpq-config --offline -h 2>&1`;
-like($result, qr/Version 1\.1\.2/, 'offline: --offline + -h shows version');
+like($result, qr/Version 1\.1\.3/, 'offline: --offline + -h shows version');

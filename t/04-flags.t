@@ -5,7 +5,7 @@ use Test::More tests => 6;
 
 # Test -h flag
 my $help = `perl bpq-config -h 2>&1`;
-like($help, qr/Version 1\.1\.2/, '-h shows version');
+like($help, qr/Version 1\.1\.3/, '-h shows version');
 like($help, qr/offline/,        '-h mentions --offline');
 is($?, 0, '-h exits successfully');
 
