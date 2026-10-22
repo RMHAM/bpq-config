@@ -4,6 +4,12 @@ Modified copy of the original [bpq-config](https://www.prinmath.com/ham/) by Wil
 
 This repo is for testing purposes only. See the [original](https://www.prinmath.com/ham/) for the latest version.
 
+Self-update (`bpq-config -u`, or the update option in the menu) downloads
+`bpq-config` from this repo's `main` branch:
+`https://raw.githubusercontent.com/RMHAM/bpq-config/main/bpq-config`. Because
+GitHub sends no `Last-Modified` header, the published copy is compared byte
+for byte with the local one and only replaced when it differs.
+
 ## Setup
 
 After cloning, enable the pre-commit hooks:

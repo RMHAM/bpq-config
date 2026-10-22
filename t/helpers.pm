@@ -36,9 +36,26 @@ sub extract_subs
       die "Sub '$name' not found in bpq-config\n" unless exists $subs{$name};
    }
 
+   # Pull in file-scoped declarations for variables used by the wanted subs
+   my %needed;
+   for my $name (@wanted)
+   {
+      $needed{$1} = 1 while ($subs{$name} =~ /\$([A-Za-z_]\w*)/g);
+   }
+   my @decls;
+   while ($code =~ /^((?:my|our)\s+\$[A-Za-z_]\w*[^;]*;)/mg)
+   {
+      my $decl = $1;
+      my ($var) = ($decl =~ /\$([A-Za-z_]\w*)/);
+      next unless ($needed{$var});
+      $decl =~ s/^my\b/our/;   # Share the variable with the test package
+      push @decls,$decl;
+   }
+
    # Compile into caller's package
    my $caller = caller;
    my $compiled = "package $caller;\nuse strict;\nuse warnings;\nno warnings 'redefine';\n";
+   $compiled .= join("\n",@decls) . "\n" if (@decls);
    for my $name (@wanted)
    {
       $compiled .= $subs{$name} . "\n\n";

@@ -35,11 +35,13 @@
 #  Version 1.0.15 31-Mar-2022  Add libconfig9 to prerequisites
 #  Version 1.0.16 25-May-2023  Add libpcap0.8 to prerequisites
 #  Version 1.1.0   6-Jun-2026  Offline flag, hardening, new features (Joey Stanford NV0N)
+#  Version 1.1.1  22-Oct-2026  Keep existing files when a download fails (403 etc.)
+#  Version 1.1.2  22-Oct-2026  Self-update from the RMHAM GitHub repo
 
 use strict;
 use warnings;
 
-my $ver = '1.1.0';
+my $ver = '1.1.2';
 
 my $about =
   "Interactive program to configure BPQ32.\n".
@@ -457,27 +459,225 @@ sub sys
 }
 
 #
+#  Number of items that failed in the last download() run
+#
+my $failed = 0;
+
+#
+#  Check the leading bytes of a file (rejects HTML error pages)
+#
+sub starts
+{
+   my ($file,$magic) = @_;
+   open(my $fh,'<',$file) || return 0;
+   binmode($fh);
+   my $buf = '';
+   read($fh,$buf,length($magic));
+   close($fh);
+   return ($buf eq $magic);
+}
+
+#
+#  Compare two files byte for byte
+#
+sub samefile
+{
+   my ($a,$b) = @_;
+   my @sa = stat($a) or return 0;
+   my @sb = stat($b) or return 0;
+   if ($sa[7] != $sb[7])
+   {
+      return 0;
+   }
+   open(my $fa,'<',$a) || return 0;
+   open(my $fb,'<',$b) || return 0;
+   binmode($fa);
+   binmode($fb);
+   my ($ba,$bb) = ('','');
+   my $same = 1;
+   while ($same)
+   {
+      my $ra = read($fa,$ba,65536);
+      my $rb = read($fb,$bb,65536);
+      if (!defined($ra) || !defined($rb) || $ra != $rb || $ba ne $bb)
+      {
+         $same = 0;
+      }
+      last if (!$same || $ra == 0);
+   }
+   close($fa);
+   close($fb);
+   return $same;
+}
+
+#
+#  Download a URL to a temporary file and only install it when it passed
+#  validation. An existing file is never removed first, so a failed download
+#  (e.g. a 403 from the host) leaves the previous copy in place.
+#
+sub fetch
+{
+   my ($url,$dest,$desc,$kind) = @_;
+   $desc ||= $dest;
+   my %magic = (elf=>"\x7fELF",zip=>"PK\x03\x04",script=>'#!');
+   my $tmp = "$dest.download.$$";
+   unlink $tmp;
+   my $rc = system('wget','-q','-O',$tmp,$url);
+   my $ok = ($rc == 0);
+   if (!$ok)
+   {
+      my $why = ($rc == -1) ? 'wget not found' : 'wget exit ' . ($rc >> 8);
+      $why .= ' - server refused the request (403/404?)' if ($rc > 0 && ($rc >> 8) == 8);
+      warn "fetch: $desc failed ($why): $url\n";
+   }
+   elsif (!-s $tmp)
+   {
+      warn "fetch: $desc failed (empty response): $url\n";
+      $ok = 0;
+   }
+   elsif ($kind && !starts($tmp,$magic{$kind}))
+   {
+      warn "fetch: $desc failed (response is not a valid $kind file): $url\n";
+      $ok = 0;
+   }
+   elsif (!rename($tmp,$dest))
+   {
+      warn "fetch: $desc failed (cannot install $dest: $!)\n";
+      $ok = 0;
+   }
+   unlink $tmp;
+   if (!$ok)
+   {
+      $failed++;
+      warn "fetch: keeping existing $dest\n" if (-e $dest);
+   }
+   return $ok;
+}
+
+#
+#  Unpack a zip file, warning and counting failures
+#
+sub extract
+{
+   my ($zip,$dir,$desc,@members) = @_;
+   my @cmd = ('unzip','-q','-o');
+   push @cmd,'-d',$dir if (defined($dir) && $dir ne '');
+   push @cmd,$zip;
+   push @cmd,@members if (@members);
+   if (system(@cmd))
+   {
+      warn "fetch: $desc failed (unzip exit " . ($? >> 8) . ")\n";
+      $failed++;
+      return 0;
+   }
+   return 1;
+}
+
+#
+#  Self-update bpq-config from the RMHAM fork on GitHub. Content is compared
+#  rather than timestamps (GitHub's raw server sends no Last-Modified header),
+#  so an unchanged local copy is never rewritten.
+#
+sub selfupdate
+{
+   my $url = 'https://raw.githubusercontent.com/RMHAM/bpq-config/main/bpq-config';
+   my $dir = ".selfupdate.$$";
+   my $tmp = "$dir/bpq-config";
+   my $ok = 0;
+   system('rm','-Rf',$dir);
+   if (system('mkdir','-p',$dir))
+   {
+      warn "fetch: Self-update failed (cannot create $dir)\n";
+   }
+   elsif (system('wget','-q','-O',$tmp,$url))
+   {
+      warn "fetch: Self-update failed (wget exit " . ($? >> 8) . "): $url\n";
+   }
+   elsif (!-s $tmp || !starts($tmp,'#!'))
+   {
+      warn "fetch: Self-update failed (published bpq-config is not a script): $url\n";
+   }
+   elsif (-e 'bpq-config' && samefile($tmp,'bpq-config'))
+   {
+      $ok = 1;   #  Local copy is up to date
+   }
+   elsif (rename($tmp,'bpq-config'))
+   {
+      chmod(0755,'bpq-config');
+      $ok = 1;
+   }
+   else
+   {
+      warn "fetch: Self-update failed (cannot install bpq-config: $!)\n";
+   }
+   system('rm','-Rf',$dir);
+   $failed++ if (!$ok);
+   return $ok;
+}
+
+#
 #  Download
 #
 sub download
 {
+   my $base = 'https://www.cantab.net/users/john.wiseman';
+   $failed = 0;
    #  Mirror bpq-config (skip if offline)
    if (!$offline)
    {
-      sys("wget -m -nd -nH https://www.prinmath.com/ham/bpq-config;chmod a+x bpq-config","Self-update");
+      selfupdate();
    }
-   #  Delete and re-download pilinbpq
-   sys("rm -f pilinbpq;wget https://www.cantab.net/users/john.wiseman/Downloads/pilinbpq;chmod a+x pilinbpq","pilinbpq download");
-   #  Delete and re-dowload HTML pages
-   sys("rm -Rf HTML;mkdir HTML;(cd HTML;wget https://www.cantab.net/users/john.wiseman/Downloads/HTMLPages.zip;unzip -q HTMLPages.zip;rm -f HTMLPages.zip)","HTML pages");
-   #  Delete and re-download pitnc_*params
-   sys("rm -f pitnc_*params;wget https://www.cantab.net/users/john.wiseman/Downloads/pitnc_getset.zip;unzip -q pitnc_getset.zip pitnc_\\*params;chmod a+x pitnc_*params;rm -f pitnc_getset.zip","pitnc params");
+   #  Re-download pilinbpq
+   fetch("$base/Downloads/pilinbpq",'pilinbpq','pilinbpq download','elf')
+      && chmod(0755,'pilinbpq');
+   #  Re-download HTML pages
+   system('rm','-Rf','HTML');
+   if (!-d 'HTML' && !mkdir('HTML'))
+   {
+      warn "fetch: HTML pages failed (cannot create HTML directory)\n";
+      $failed++;
+   }
+   elsif (fetch("$base/Downloads/HTMLPages.zip",'HTMLPages.zip','HTML pages','zip'))
+   {
+      extract('HTMLPages.zip','HTML','HTML pages');
+   }
+   unlink 'HTMLPages.zip';
+   #  Re-download pitnc_*params
+   if (fetch("$base/Downloads/pitnc_getset.zip",'pitnc_getset.zip','pitnc params','zip'))
+   {
+      extract('pitnc_getset.zip',undef,'pitnc params','pitnc_*params')
+         && chmod(0755,glob('pitnc_*params'));
+   }
+   unlink 'pitnc_getset.zip';
    #  Download piBPQAPRS
-   sys("rm -f piBPQAPRS;wget https://www.cantab.net/users/john.wiseman/Downloads/piBPQAPRS;chmod a+x piBPQAPRS","piBPQAPRS");
+   fetch("$base/Downloads/piBPQAPRS",'piBPQAPRS','piBPQAPRS','elf')
+      && chmod(0755,'piBPQAPRS');
    #  Download Symbols and Maps
-   sys("rm -Rf BPQAPRS;mkdir BPQAPRS;wget https://www.cantab.net/users/john.wiseman/Downloads/LinBPQAPRS.zip;unzip -q LinBPQAPRS.zip;rm -f LinBPQAPRS.zip","Symbols/Maps");
+   system('rm','-Rf','BPQAPRS');
+   if (!-d 'BPQAPRS' && !mkdir('BPQAPRS'))
+   {
+      warn "fetch: Symbols/Maps failed (cannot create BPQAPRS directory)\n";
+      $failed++;
+   }
+   elsif (fetch("$base/Downloads/LinBPQAPRS.zip",'LinBPQAPRS.zip','Symbols/Maps','zip'))
+   {
+      extract('LinBPQAPRS.zip','BPQAPRS','Symbols/Maps');
+   }
+   unlink 'LinBPQAPRS.zip';
    #  Download APRS HTML pages
-   sys("(cd BPQAPRS;wget https://www.cantab.net/users/john.wiseman/Documents/Samples/APRSHTML.zip;unzip -o -q APRSHTML.zip;rm -f APRSHTML.zip)","APRS HTML");
+   if (-d 'BPQAPRS' &&
+       fetch("$base/Documents/Samples/APRSHTML.zip",'BPQAPRS/APRSHTML.zip','APRS HTML','zip'))
+   {
+      extract('BPQAPRS/APRSHTML.zip','BPQAPRS','APRS HTML');
+   }
+   unlink 'BPQAPRS/APRSHTML.zip';
+   if ($failed)
+   {
+      warn "\ndownload: $failed item(s) failed - existing files were kept.\n";
+      warn "download: a 403 from cantab.net means the download host is refusing all\n";
+      warn "download: requests; retry later, or install the files by hand.\n";
+   }
+   return !$failed;
 }
 
 #  Check configuration
@@ -1405,7 +1605,11 @@ if ($reboot)
 if (@ARGV>0  && $ARGV[0] eq '-u')
 {
    warn "Updating Software\n\n";
-   download();
+   if (!download())
+   {
+      warn "\nUpdate failed; BPQ was not restarted.\n";
+      exit(1);
+   }
    warn "\nRestarting BPQ\n";
    sys('systemctl restart bpq.service','Restart BPQ');
    exit;
@@ -1448,7 +1652,11 @@ if ($quick)
       my $sel = choice("Quick Start Configuration","BPQ appears to be downloaded already.\n\nDo you want to download it again?",'Skip Download','Download Again');
       $dl = ($sel =~ /Again/);
    }
-   $dl && download();
+   if ($dl && !download() && !-s 'pilinbpq')
+   {
+      warn "\nDownload failed and pilinbpq is not installed - aborting.\n";
+      exit(1);
+   }
    #  Get parameters
    while (1)
    {
@@ -1586,11 +1794,12 @@ already exists, asks to erase it first.
 =item B<-u>
 
 Update BPQ software (pilinbpq, HTML pages, TNC params, APRS tools) and
-restart the BPQ service. Non-interactive.
+restart the BPQ service. Non-interactive. If any download fails the service
+is not restarted and the exit status is non-zero.
 
 =item B<-o>, B<--offline>
 
-Skip self-update from prinmath.com. Use when testing modifications to
+Skip self-update from the RMHAM GitHub repo. Use when testing modifications to
 bpq-config itself. All other downloads (pilinbpq, HTML, etc.) still occur.
 
 The environment variable C<BPQ_OFFLINE> can also be set to enable this mode.
@@ -1601,6 +1810,13 @@ Interactive mode. Presents a menu to download/update BPQ, configure the
 node, or check status.
 
 =back
+
+=head1 DOWNLOADS
+
+Each download is written to a temporary file and only replaces the existing
+copy after it has been validated, so a failed download (for example a 403
+from the host) leaves the current installation untouched instead of
+replacing a working program with an empty or error-page file.
 
 =head1 FILES
 
@@ -1631,7 +1847,7 @@ Systemd service file for auto-starting BPQ on boot.
 
 =item C<BPQ_OFFLINE>
 
-When set to a truthy value, disables the prinmath.com self-update check
+When set to a truthy value, disables the GitHub self-update check
 (same as B<--offline>).
 
 =back
